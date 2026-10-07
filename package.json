@@ -1,5 +1,10 @@
 {
+  "name": "twikoo-netlify",
+  "private": true,
   "dependencies": {
-    "twikoo-netlify": "1.7.7"
+    "twikoo-netlify": "2.0.12"
+  },
+  "engines": {
+    "node": ">=22.12.0"
   }
 }

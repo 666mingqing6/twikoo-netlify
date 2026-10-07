@@ -1,0 +1,110 @@
+# ============================================================
+#  Twikoo 自动更新
+#
+#  背景：
+#    Twikoo 官方明确说明「没有实现自动更新，也没有计划实现」，
+#    因此这里自建一套 GitHub Actions 工作流来实现。
+#
+#  原理：
+#    定时（或手动）检查 npm 上 twikoo-netlify 的最新版本，
+#    与 package.json 里锁定的版本比对：
+#      · 有新版 → 自动改写 package.json 并提交
+#      · 提交后 Netlify 检测到 package.json 变化 → 自动重新部署
+#        （依赖版本变了，Netlify 会重新解析并安装，不会命中旧缓存）
+#
+#  为什么用「具体版本号」而不是官方文档建议的 latest：
+#    latest 虽然省事，但 Netlify 构建缓存命中时不会重新解析 latest，
+#    需要人工去控制台点「Clear cache and deploy」。
+#    锁定具体版本号后，版本一变 package.json 就变，能可靠触发重装；
+#    而版本号本身由本工作流自动维护，效果与 latest 等价且更可控。
+#
+#  触发方式：
+#    · 每周一 UTC 03:00（北京时间 11:00）自动检查
+#    · 也可在 Actions 页面点 Run workflow 手动检查
+# ============================================================
+
+name: 自动更新 Twikoo
+
+on:
+  schedule:
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+# 需要写权限才能把更新后的 package.json 提交回仓库
+permissions:
+  contents: write
+
+# 避免并发提交
+concurrency:
+  group: twikoo-auto-update
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: 检查最新版本
+        id: check
+        run: |
+          set -e
+          LATEST=$(npm view twikoo-netlify version)
+          CURRENT=$(node -p "require('./package.json').dependencies['twikoo-netlify']")
+          echo "当前锁定版本：$CURRENT"
+          echo "npm 最新版本：$LATEST"
+          if [ "$LATEST" = "$CURRENT" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "version=$CURRENT" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "version=$LATEST" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 更新 package.json
+        if: steps.check.outputs.changed == 'true'
+        env:
+          NEW_VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.dependencies['twikoo-netlify'] = process.env.NEW_VERSION;
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          echo "----- 更新后的 package.json -----"
+          cat package.json
+
+      - name: 提交并推送
+        if: steps.check.outputs.changed == 'true'
+        env:
+          NEW_VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json
+          git commit -m "chore(twikoo): 自动更新到 ${NEW_VERSION}"
+          git push
+
+      - name: 结果汇总
+        env:
+          CHANGED: ${{ steps.check.outputs.changed }}
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          if [ "$CHANGED" = "true" ]; then
+            echo "::notice::已将 twikoo-netlify 更新到 ${VERSION}，Netlify 将自动重新部署"
+            echo "### ✅ 已更新到 ${VERSION}" >> "$GITHUB_STEP_SUMMARY"
+            echo "Netlify 检测到 package.json 变化后会自动重新部署。" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "> ⚠️ 部署完成后，请同步把博客前端的 Twikoo CDN 版本号改为 \`${VERSION}\`。" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::notice::已是最新版本（${VERSION}），无需更新"
+            echo "### ℹ️ 已是最新版本（${VERSION}）" >> "$GITHUB_STEP_SUMMARY"
+          fi
